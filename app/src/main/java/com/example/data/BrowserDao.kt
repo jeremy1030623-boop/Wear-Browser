@@ -22,4 +22,25 @@ interface BrowserDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun cachePage(page: CachedPage)
+
+    @Query("SELECT * FROM downloaded_files ORDER BY timestamp DESC")
+    fun getAllDownloadedFiles(): Flow<List<DownloadedFile>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDownloadedFile(file: DownloadedFile)
+
+    @Query("DELETE FROM downloaded_files WHERE id = :id")
+    suspend fun deleteDownloadedFile(id: Long)
+
+    @Query("SELECT * FROM history_entries ORDER BY timestamp DESC")
+    fun getAllHistory(): Flow<List<HistoryEntry>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertHistoryEntry(entry: HistoryEntry)
+
+    @Query("DELETE FROM history_entries WHERE id = :id")
+    suspend fun deleteHistoryEntry(id: Long)
+
+    @Query("DELETE FROM history_entries")
+    suspend fun clearAllHistory()
 }

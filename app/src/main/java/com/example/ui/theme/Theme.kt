@@ -1,10 +1,13 @@
 package com.example.ui.theme
 
+import android.os.Build
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.Typography
 import androidx.compose.ui.graphics.Color
 import androidx.wear.compose.material3.ColorScheme
+import androidx.core.content.ContextCompat
 
 private val WearDarkColorScheme = ColorScheme(
     primary = Color(0xFFD0BCFF),
@@ -32,8 +35,34 @@ private val WearDarkColorScheme = ColorScheme(
 fun WearAppTheme(
     content: @Composable () -> Unit
 ) {
+    val context = LocalContext.current
+    val colorScheme = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        try {
+            val systemAccent = Color(ContextCompat.getColor(context, android.R.color.system_accent1_300))
+            val systemAccentContainer = Color(ContextCompat.getColor(context, android.R.color.system_accent1_700))
+            val systemOnAccentContainer = Color(ContextCompat.getColor(context, android.R.color.system_accent1_100))
+            
+            val systemSecondary = Color(ContextCompat.getColor(context, android.R.color.system_accent2_300))
+            val systemSecondaryContainer = Color(ContextCompat.getColor(context, android.R.color.system_accent2_700))
+            val systemOnSecondaryContainer = Color(ContextCompat.getColor(context, android.R.color.system_accent2_100))
+
+            WearDarkColorScheme.copy(
+                primary = systemAccent,
+                primaryContainer = systemAccentContainer,
+                onPrimaryContainer = systemOnAccentContainer,
+                secondary = systemSecondary,
+                secondaryContainer = systemSecondaryContainer,
+                onSecondaryContainer = systemOnSecondaryContainer
+            )
+        } catch (e: Exception) {
+            WearDarkColorScheme
+        }
+    } else {
+        WearDarkColorScheme
+    }
+
     MaterialTheme(
-        colorScheme = WearDarkColorScheme,
+        colorScheme = colorScheme,
         content = content
     )
 }
