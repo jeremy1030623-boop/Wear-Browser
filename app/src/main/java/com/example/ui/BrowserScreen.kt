@@ -3,6 +3,8 @@ package com.example.ui
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.graphics.Bitmap
+import android.os.Build
+import android.view.Surface
 import android.speech.RecognizerIntent
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -49,11 +51,8 @@ import androidx.wear.compose.material3.*
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
 import androidx.wear.compose.foundation.lazy.items
 import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
-import androidx.wear.compose.material3.Text
-import androidx.wear.compose.material3.Button
-import androidx.wear.compose.material3.IconButton
-import androidx.wear.compose.material3.Icon
-import androidx.wear.compose.material3.TimeText
+import androidx.wear.compose.material3.*
+import androidx.wear.compose.material.PositionIndicator
 import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
@@ -72,6 +71,7 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     val history by viewModel.history.collectAsState()
     val textZoom by viewModel.textZoom.collectAsState()
     val isSpeaking by viewModel.isSpeaking.collectAsState()
+    val searchEngine by viewModel.searchEngine.collectAsState()
     
     var showMenu by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
@@ -156,6 +156,9 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                         onDeleteDownloadedFile = { id, path ->
                             viewModel.deleteDownloadedFile(id, path)
                         },
+                        onDeleteBookmark = { url ->
+                            viewModel.removeBookmark(url)
+                        },
                         onDeleteHistoryEntry = { id ->
                             viewModel.deleteHistoryEntry(id)
                         },
@@ -177,7 +180,14 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                         history = history,
                         onNavigate = { url ->
                             viewModel.navigateTo(url)
-                        }
+                        },
+                        textZoom = textZoom,
+                        onSetTextZoom = { viewModel.setTextZoom(it) },
+                        searchEngine = searchEngine,
+                        onSetSearchEngine = { viewModel.setSearchEngine(it) },
+                        isDeepMode = isDeepMode,
+                        onToggleDeepMode = { viewModel.toggleDeepMode() },
+                        onClearHistory = { viewModel.clearHistory() }
                     )
                 }
                 ScreenState.BROWSER -> {
@@ -198,10 +208,15 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                             isPowerSaving = isPowerSavingMode,
                             textZoom = textZoom,
                             onPageStarted = { isLoading = true },
-                            onPageFinished = { title ->
+                            onPageFinished = { title, loadedUrl ->
                                 isLoading = false
                                 pageTitle = title ?: ""
-                                viewModel.addToHistory(currentUrl, pageTitle)
+                                if (loadedUrl != null && loadedUrl != "about:blank") {
+                                    viewModel.updateUrlFromWebView(loadedUrl)
+                                    viewModel.addToHistory(loadedUrl, pageTitle)
+                                } else {
+                                    viewModel.addToHistory(currentUrl, pageTitle)
+                                }
                                 canGoBack = webViewRef?.canGoBack() == true
                                 canGoForward = webViewRef?.canGoForward() == true
                             },
@@ -229,11 +244,26 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
                                     Icon(Icons.Default.Menu, contentDescription = "Menu")
                                 }
                                 
+                                val isBookmarked = bookmarks.any { it.url == currentUrl }
+                                val bookmarkInt = remember { MutableInteractionSource() }
                                 IconButton(
-                                    onClick = { viewModel.addBookmark(currentUrl, pageTitle) },
-                                    modifier = Modifier.size(32.dp)
+                                    onClick = {
+                                        if (isBookmarked) {
+                                            viewModel.removeBookmark(currentUrl)
+                                        } else {
+                                            viewModel.addBookmark(currentUrl, pageTitle)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .expressiveScale(bookmarkInt),
+                                    interactionSource = bookmarkInt
                                 ) {
-                                    Icon(Icons.Filled.Bookmark, contentDescription = "Bookmark")
+                                    Icon(
+                                        imageVector = Icons.Filled.Bookmark,
+                                        contentDescription = "Bookmark",
+                                        tint = if (isBookmarked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                    )
                                 }
 
                                 IconButton(
@@ -390,7 +420,7 @@ fun WebViewComponent(
     isPowerSaving: Boolean,
     textZoom: Int,
     onPageStarted: () -> Unit,
-    onPageFinished: (String?) -> Unit,
+    onPageFinished: (String?, String?) -> Unit,
     onWebViewCreated: (WebView) -> Unit,
     onDownloadRequested: (String, String?, String?) -> Unit
 ) {
@@ -412,7 +442,7 @@ fun WebViewComponent(
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
-                        onPageFinished(view?.title)
+                        onPageFinished(view?.title, url)
                     }
 
                     override fun shouldOverrideUrlLoading(
@@ -441,13 +471,41 @@ fun WebViewComponent(
                     
                     cacheMode = if (isPowerSaving) WebSettings.LOAD_CACHE_ONLY else WebSettings.LOAD_DEFAULT
                 }
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    try {
+                        val method = android.view.View::class.java.getMethod(
+                            "setFrameRate",
+                            Float::class.javaPrimitiveType,
+                            Int::class.javaPrimitiveType
+                        )
+                        method.invoke(this, if (isPowerSaving) 30f else 0f, 0)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
             }
         },
         update = { webView ->
-            if (webView.url != url) {
+            if (url != "wearbrowser://home" && !url.startsWith("wearbrowser://") && webView.url != url) {
                 webView.loadUrl(url)
             }
             webView.settings.textZoom = textZoom
+            webView.settings.javaScriptEnabled = !isPowerSaving
+            webView.settings.cacheMode = if (isPowerSaving) WebSettings.LOAD_CACHE_ONLY else WebSettings.LOAD_DEFAULT
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    val method = android.view.View::class.java.getMethod(
+                        "setFrameRate",
+                        Float::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType
+                    )
+                    method.invoke(webView, if (isPowerSaving) 30f else 0f, 0)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
         },
         modifier = Modifier.fillMaxSize()
     )
@@ -571,6 +629,7 @@ fun BookmarkMenu(
     onToggleSpeak: () -> Unit,
     onTranslate: (String) -> Unit,
     onDeleteDownloadedFile: (Long, String) -> Unit,
+    onDeleteBookmark: (String) -> Unit,
     onDeleteHistoryEntry: (Long) -> Unit,
     onClearHistory: () -> Unit,
     onNavigate: (String) -> Unit,
@@ -942,14 +1001,74 @@ fun BookmarkMenu(
                 }
 
                 items(bookmarks) { bookmark ->
+                    val cardInt = remember { MutableInteractionSource() }
                     Card(
                         onClick = { onNavigate(bookmark.url) },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp)
+                            .expressiveScale(cardInt),
+                        interactionSource = cardInt,
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                     ) {
-                        Column {
-                            Text(bookmark.title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurface)
-                            Text(bookmark.url, style = MaterialTheme.typography.bodySmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .background(
+                                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                            shape = RoundedCornerShape(4.dp)
+                                        )
+                                        .padding(2.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    AsyncImage(
+                                        model = "https://www.google.com/s2/favicons?sz=64&domain_url=${bookmark.url}",
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                                Column {
+                                    Text(
+                                        bookmark.title,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        maxLines = 1,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        bookmark.url,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 1,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            val deleteInt = remember { MutableInteractionSource() }
+                            IconButton(
+                                onClick = { onDeleteBookmark(bookmark.url) },
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .expressiveScale(deleteInt),
+                                interactionSource = deleteInt
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "Delete bookmark",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -1024,13 +1143,37 @@ fun BookmarkMenu(
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                         ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(entry.title, style = MaterialTheme.typography.labelMedium, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
-                                    Text(entry.url, style = MaterialTheme.typography.bodySmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(24.dp)
+                                            .background(
+                                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                                shape = RoundedCornerShape(4.dp)
+                                            )
+                                            .padding(2.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        AsyncImage(
+                                            model = "https://www.google.com/s2/favicons?sz=64&domain_url=${entry.url}",
+                                            contentDescription = null,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                    Column {
+                                        Text(entry.title, style = MaterialTheme.typography.labelMedium, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
+                                        Text(entry.url, style = MaterialTheme.typography.bodySmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                 }
                                 IconButton(
                                     onClick = { onDeleteHistoryEntry(entry.id) },
@@ -1288,7 +1431,7 @@ fun BookmarkMenu(
                         Box(
                             modifier = Modifier
                                 .size(110.dp)
-                                .background(Color.White, shape = MaterialTheme.shapes.medium)
+                                .background(MaterialTheme.colorScheme.background, shape = MaterialTheme.shapes.medium)
                                 .padding(8.dp),
                             contentAlignment = Alignment.Center
                         ) {
@@ -1334,13 +1477,22 @@ fun BookmarkMenu(
 fun HomeScreen(
     bookmarks: List<com.example.data.Bookmark>,
     history: List<com.example.data.HistoryEntry>,
-    onNavigate: (String) -> Unit
+    onNavigate: (String) -> Unit,
+    textZoom: Int,
+    onSetTextZoom: (Int) -> Unit,
+    searchEngine: String,
+    onSetSearchEngine: (String) -> Unit,
+    isDeepMode: Boolean,
+    onToggleDeepMode: () -> Unit,
+    onClearHistory: () -> Unit
 ) {
+    val context = LocalContext.current
     val listState = rememberScalingLazyListState()
     val focusRequester = remember { FocusRequester() }
     val coroutineScope = rememberCoroutineScope()
 
     var showSearchDialog by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
@@ -1426,7 +1578,19 @@ fun HomeScreen(
                                 .expressiveScale(googleInt),
                             interactionSource = googleInt
                         ) {
-                            Icon(Icons.Default.Search, contentDescription = "Google", tint = MaterialTheme.colorScheme.primary)
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(MaterialTheme.colorScheme.background, shape = RoundedCornerShape(8.dp))
+                                    .padding(4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                AsyncImage(
+                                    model = "https://www.google.com/s2/favicons?sz=64&domain_url=https://www.google.com",
+                                    contentDescription = "Google",
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
                         }
                         val wikiInt = remember { MutableInteractionSource() }
                         IconButton(
@@ -1436,7 +1600,19 @@ fun HomeScreen(
                                 .expressiveScale(wikiInt),
                             interactionSource = wikiInt
                         ) {
-                            Icon(Icons.Default.MenuBook, contentDescription = "Wikipedia", tint = MaterialTheme.colorScheme.secondary)
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .background(MaterialTheme.colorScheme.background, shape = RoundedCornerShape(8.dp))
+                                    .padding(4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                AsyncImage(
+                                    model = "https://www.google.com/s2/favicons?sz=64&domain_url=https://en.wikipedia.org",
+                                    contentDescription = "Wikipedia",
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
                         }
                     }
                 }
@@ -1458,9 +1634,33 @@ fun HomeScreen(
                             interactionSource = cardInt,
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                         ) {
-                            Column {
-                                Text(bookmark.title, style = MaterialTheme.typography.labelMedium, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
-                                Text(bookmark.url, style = MaterialTheme.typography.bodySmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .background(
+                                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                            shape = RoundedCornerShape(4.dp)
+                                        )
+                                        .padding(2.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    AsyncImage(
+                                        model = "https://www.google.com/s2/favicons?sz=64&domain_url=${bookmark.url}",
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                                Column {
+                                    Text(bookmark.title, style = MaterialTheme.typography.labelMedium, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
+                                    Text(bookmark.url, style = MaterialTheme.typography.bodySmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
                         }
                     }
@@ -1483,10 +1683,55 @@ fun HomeScreen(
                             interactionSource = cardInt,
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                         ) {
-                            Column {
-                                Text(entry.title, style = MaterialTheme.typography.labelMedium, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
-                                Text(entry.url, style = MaterialTheme.typography.bodySmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .background(
+                                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                            shape = RoundedCornerShape(4.dp)
+                                        )
+                                        .padding(2.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    AsyncImage(
+                                        model = "https://www.google.com/s2/favicons?sz=64&domain_url=${entry.url}",
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                                Column {
+                                    Text(entry.title, style = MaterialTheme.typography.labelMedium, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
+                                    Text(entry.url, style = MaterialTheme.typography.bodySmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
+                        }
+                    }
+                }
+
+                item {
+                    val settingsInt = remember { MutableInteractionSource() }
+                    Button(
+                        onClick = { showSettingsDialog = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                            .expressiveScale(settingsInt),
+                        interactionSource = settingsInt
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(Icons.Default.Settings, contentDescription = "Settings Icon", modifier = Modifier.size(16.dp))
+                            Text("設定", style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
@@ -1561,7 +1806,13 @@ fun HomeScreen(
                                             val dest = if (searchQuery.contains(".") && !searchQuery.contains(" ")) {
                                                 if (searchQuery.startsWith("http")) searchQuery else "https://$searchQuery"
                                             } else {
-                                                "https://www.google.com/search?q=${URLEncoder.encode(searchQuery, "UTF-8")}"
+                                                val encoded = URLEncoder.encode(searchQuery, "UTF-8")
+                                                when (searchEngine) {
+                                                    "Bing" -> "https://www.bing.com/search?q=$encoded"
+                                                    "DuckDuckGo" -> "https://duckduckgo.com/?q=$encoded"
+                                                    "Baidu" -> "https://www.baidu.com/s?wd=$encoded"
+                                                    else -> "https://www.google.com/search?q=$encoded"
+                                                }
                                             }
                                             onNavigate(dest)
                                             showSearchDialog = false
@@ -1579,7 +1830,13 @@ fun HomeScreen(
                                     val dest = if (searchQuery.contains(".") && !searchQuery.contains(" ")) {
                                         if (searchQuery.startsWith("http")) searchQuery else "https://$searchQuery"
                                     } else {
-                                        "https://www.google.com/search?q=${URLEncoder.encode(searchQuery, "UTF-8")}"
+                                        val encoded = URLEncoder.encode(searchQuery, "UTF-8")
+                                        when (searchEngine) {
+                                            "Bing" -> "https://www.bing.com/search?q=$encoded"
+                                            "DuckDuckGo" -> "https://duckduckgo.com/?q=$encoded"
+                                            "Baidu" -> "https://www.baidu.com/s?wd=$encoded"
+                                            else -> "https://www.google.com/search?q=$encoded"
+                                        }
                                     }
                                     onNavigate(dest)
                                     showSearchDialog = false
@@ -1589,6 +1846,248 @@ fun HomeScreen(
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                         ) {
                             Text("Go", color = MaterialTheme.colorScheme.onPrimary)
+                        }
+                    }
+                }
+                
+                PositionIndicator(
+                    scalingLazyListState = searchListState,
+                    modifier = Modifier.align(Alignment.CenterEnd)
+                )
+            }
+        }
+    }
+
+    if (showSettingsDialog) {
+        ExpressiveDialog(onDismissRequest = { showSettingsDialog = false }) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .padding(8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                val settingsListState = rememberScalingLazyListState()
+                val settingsFocusRequester = remember { FocusRequester() }
+
+                LaunchedEffect(Unit) {
+                    try {
+                        settingsFocusRequester.requestFocus()
+                    } catch (e: Exception) {
+                        // Ignore
+                    }
+                }
+
+                ScalingLazyColumn(
+                    state = settingsListState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .focusRequester(settingsFocusRequester)
+                        .focusable()
+                        .onRotaryScrollEvent {
+                            coroutineScope.launch {
+                                settingsListState.scrollBy(it.verticalScrollPixels)
+                            }
+                            true
+                        },
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    item {
+                        ListHeader {
+                            Text("個人化設定", style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+
+                    // 1. 搜尋引擎選擇
+                    item {
+                        ListHeader {
+                            Text("預設搜尋引擎", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+
+                    val engines = listOf("Google", "Bing", "DuckDuckGo", "Baidu")
+                    items(engines) { engine ->
+                        val engineInt = remember { MutableInteractionSource() }
+                        Card(
+                            onClick = { if (searchEngine != engine) onSetSearchEngine(engine) },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (searchEngine == engine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                .expressiveScale(engineInt),
+                            interactionSource = engineInt
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    engine,
+                                    color = if (searchEngine == engine) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                                if (searchEngine == engine) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Selected",
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. 字型大小
+                    item {
+                        ListHeader {
+                            Text("網頁字型大小", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+
+                    val zooms = listOf(75, 100, 125, 150, 175, 200)
+                    items(zooms) { zoom ->
+                        val zoomInt = remember { MutableInteractionSource() }
+                        Card(
+                            onClick = { onSetTextZoom(zoom) },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (textZoom == zoom) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                .expressiveScale(zoomInt),
+                            interactionSource = zoomInt
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "$zoom%",
+                                    color = if (textZoom == zoom) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                                if (textZoom == zoom) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Selected",
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. 極致純黑模式
+                    item {
+                        ListHeader {
+                            Text("極致深色模式", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+
+                    item {
+                        val oledInt = remember { MutableInteractionSource() }
+                        Card(
+                            onClick = { onToggleDeepMode() },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isDeepMode) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                .expressiveScale(oledInt),
+                            interactionSource = oledInt
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        "OLED 純黑省電",
+                                        color = if (isDeepMode) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                    Text(
+                                        if (isDeepMode) "已啟用" else "未啟用",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (isDeepMode) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurface)
+                                }
+                                if (isDeepMode) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Enabled",
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 4. 清除歷史紀錄
+                    item {
+                        ListHeader {
+                            Text("安全與隱私", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+
+                    item {
+                        val clearInt = remember { MutableInteractionSource() }
+                        Card(
+                            onClick = {
+                                onClearHistory()
+                                Toast.makeText(context, "已清除所有瀏覽歷史", Toast.LENGTH_SHORT).show()
+                            },
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                .expressiveScale(clearInt),
+                            interactionSource = clearInt
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "清除瀏覽歷史",
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    style = MaterialTheme.typography.labelMedium
+                                )
+                            }
+                        }
+                    }
+
+                    // 5. 關閉按鈕
+                    item {
+                        val closeInt = remember { MutableInteractionSource() }
+                        Button(
+                            onClick = { showSettingsDialog = false },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                .expressiveScale(closeInt),
+                            interactionSource = closeInt,
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        ) {
+                            Text("完成", color = MaterialTheme.colorScheme.onPrimary)
                         }
                     }
                 }

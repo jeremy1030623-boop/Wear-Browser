@@ -6,6 +6,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Environment
+import android.os.PowerManager
+import android.content.BroadcastReceiver
+import android.os.Build
 import android.webkit.URLUtil
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
@@ -43,6 +46,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val _textZoom = MutableStateFlow(100) // Default 100% text scale
     val textZoom: StateFlow<Int> = _textZoom.asStateFlow()
 
+    private val _searchEngine = MutableStateFlow("Google")
+    val searchEngine: StateFlow<String> = _searchEngine.asStateFlow()
+
     private var tts: TextToSpeech? = null
     private val _isSpeaking = MutableStateFlow(false)
     val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
@@ -56,7 +62,27 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         history = repository.history.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
         
         observeBattery(application)
+        observePowerSaveMode(application)
         initTts(application)
+    }
+
+    private fun observePowerSaveMode(context: Context) {
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        if (powerManager != null) {
+            _isPowerSavingMode.value = powerManager.isPowerSaveMode
+            
+            val filter = IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    _isPowerSavingMode.value = powerManager.isPowerSaveMode
+                }
+            }
+            try {
+                context.registerReceiver(receiver, filter)
+            } catch (e: Exception) {
+                // Ignore receiver registration error if any
+            }
+        }
     }
 
     private fun observeBattery(context: Context) {
@@ -73,11 +99,21 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun navigateTo(url: String) {
+        if (url == "wearbrowser://home") {
+            _currentUrl.value = url
+            return
+        }
         var formattedUrl = url
-        if (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("file://") && !url.startsWith("about:")) {
+        if (!url.startsWith("http://") && !url.startsWith("https://") && !url.startsWith("file://") && !url.startsWith("about:") && !url.startsWith("wearbrowser://")) {
             formattedUrl = "https://$url"
         }
         _currentUrl.value = formattedUrl
+    }
+
+    fun updateUrlFromWebView(url: String) {
+        if (url.isNotBlank() && _currentUrl.value != url) {
+            _currentUrl.value = url
+        }
     }
 
     fun translatePage(targetLanguageCode: String) {
@@ -231,7 +267,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun addToHistory(url: String, title: String) {
-        if (url.isBlank() || url == "about:blank" || url.startsWith("file://")) return
+        if (url.isBlank() || url == "about:blank" || url.startsWith("file://") || url == "wearbrowser://home" || url.startsWith("wearbrowser://")) return
         viewModelScope.launch(Dispatchers.IO) {
             repository.addHistoryEntry(url, title.ifBlank { url })
         }
@@ -301,6 +337,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun setTextZoom(zoom: Int) {
         _textZoom.value = zoom
+    }
+
+    fun setSearchEngine(engine: String) {
+        _searchEngine.value = engine
     }
 
     override fun onCleared() {
