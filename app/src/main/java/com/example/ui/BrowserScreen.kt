@@ -15,6 +15,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import kotlin.math.abs
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -29,6 +33,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.alpha
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.input.rotary.onRotaryScrollEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
@@ -49,6 +58,10 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
 
+enum class ScreenState {
+    MENU, HOME, BROWSER
+}
+
 @Composable
 fun BrowserScreen(viewModel: BrowserViewModel) {
     val currentUrl by viewModel.currentUrl.collectAsState()
@@ -65,6 +78,7 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     var pageTitle by remember { mutableStateOf("") }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
+    var canGoForward by remember { mutableStateOf(false) }
  
     // Intercept swipe-to-dismiss gesture to navigate WebView history backwards gracefully, or return to home
     BackHandler(enabled = !showMenu && currentUrl != "wearbrowser://home") {
@@ -79,147 +93,292 @@ fun BrowserScreen(viewModel: BrowserViewModel) {
     val coroutineScope = rememberCoroutineScope()
 
     // Focus WebView for Physical Rotating Crown Scrolling whenever main menu closes
-    LaunchedEffect(showMenu) {
-        if (!showMenu) {
-            webViewFocusRequester.requestFocus()
+    LaunchedEffect(showMenu, currentUrl) {
+        if (!showMenu && currentUrl != "wearbrowser://home") {
+            try {
+                webViewFocusRequester.requestFocus()
+            } catch (e: Exception) {
+                // FocusRequester might not be attached to an active node yet
+            }
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        if (showMenu) {
-            BookmarkMenu(
-                bookmarks = bookmarks,
-                downloadedFiles = downloadedFiles,
-                history = history,
-                currentUrl = currentUrl,
-                textZoom = textZoom,
-                onSetTextZoom = { zoom -> viewModel.setTextZoom(zoom) },
-                isSpeaking = isSpeaking,
-                onToggleSpeak = {
-                    if (isSpeaking) {
-                        viewModel.stopSpeaking()
-                    } else {
-                        webViewRef?.evaluateJavascript(
-                            "(function() { return document.body.innerText; })();"
-                        ) { text ->
-                            val cleanText = text?.removePrefix("\"")?.removeSuffix("\"")
-                                ?.replace("\\n", " ")
-                                ?.replace("\\\"", "\"")
-                                ?.replace("\\u003C", "<")
-                            if (!cleanText.isNullOrBlank()) {
-                                viewModel.speakText(cleanText)
+    val screenState = when {
+        showMenu -> ScreenState.MENU
+        currentUrl == "wearbrowser://home" -> ScreenState.HOME
+        else -> ScreenState.BROWSER
+    }
+
+    AppScaffold {
+        Box(modifier = Modifier.fillMaxSize()) {
+            AnimatedContent(
+                targetState = screenState,
+                transitionSpec = {
+                    fadeIn(animationSpec = spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessMediumLow)) togetherWith
+                    fadeOut(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
+                },
+                label = "ScreenTransition",
+                modifier = Modifier.fillMaxSize()
+            ) { state ->
+                when (state) {
+                    ScreenState.MENU -> {
+                    BookmarkMenu(
+                        bookmarks = bookmarks,
+                        downloadedFiles = downloadedFiles,
+                        history = history,
+                        currentUrl = currentUrl,
+                        textZoom = textZoom,
+                        onSetTextZoom = { zoom -> viewModel.setTextZoom(zoom) },
+                        isSpeaking = isSpeaking,
+                        onToggleSpeak = {
+                            if (isSpeaking) {
+                                viewModel.stopSpeaking()
                             } else {
-                                Toast.makeText(viewModel.getApplication(), "No readable text on this page", Toast.LENGTH_SHORT).show()
+                                webViewRef?.evaluateJavascript(
+                                    "(function() { return document.body.innerText; })();"
+                                ) { text ->
+                                    val cleanText = text?.removePrefix("\"")?.removeSuffix("\"")
+                                        ?.replace("\\n", " ")
+                                        ?.replace("\\\"", "\"")
+                                        ?.replace("\\u003C", "<")
+                                    if (!cleanText.isNullOrBlank()) {
+                                        viewModel.speakText(cleanText)
+                                    } else {
+                                        Toast.makeText(viewModel.getApplication(), "No readable text on this page", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                        },
+                        onTranslate = { lang ->
+                            viewModel.translatePage(lang)
+                            showMenu = false
+                        },
+                        onDeleteDownloadedFile = { id, path ->
+                            viewModel.deleteDownloadedFile(id, path)
+                        },
+                        onDeleteHistoryEntry = { id ->
+                            viewModel.deleteHistoryEntry(id)
+                        },
+                        onClearHistory = {
+                            viewModel.clearHistory()
+                        },
+                        onNavigate = { url ->
+                            viewModel.navigateTo(url)
+                            showMenu = false
+                        },
+                        onClose = { showMenu = false },
+                        onToggleDeepMode = { viewModel.toggleDeepMode() },
+                        isDeepMode = isDeepMode
+                    )
+                }
+                ScreenState.HOME -> {
+                    HomeScreen(
+                        bookmarks = bookmarks,
+                        history = history,
+                        onNavigate = { url ->
+                            viewModel.navigateTo(url)
+                        }
+                    )
+                }
+                ScreenState.BROWSER -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(if (isDeepMode) Color.Black else MaterialTheme.colorScheme.background)
+                            .focusRequester(webViewFocusRequester)
+                            .focusable()
+                            .onRotaryScrollEvent {
+                                // Support high-precision mechanical crown scrolling for the web page itself!
+                                webViewRef?.scrollBy(0, (it.verticalScrollPixels * 1.5f).toInt())
+                                true
+                            }
+                    ) {
+                        WebViewComponent(
+                            url = currentUrl,
+                            isPowerSaving = isPowerSavingMode,
+                            textZoom = textZoom,
+                            onPageStarted = { isLoading = true },
+                            onPageFinished = { title ->
+                                isLoading = false
+                                pageTitle = title ?: ""
+                                viewModel.addToHistory(currentUrl, pageTitle)
+                                canGoBack = webViewRef?.canGoBack() == true
+                                canGoForward = webViewRef?.canGoForward() == true
+                            },
+                            onWebViewCreated = { webViewRef = it },
+                            onDownloadRequested = { downloadUrl, contentDisposition, mimeType ->
+                                viewModel.downloadFile(downloadUrl, contentDisposition, mimeType)
+                            }
+                        )
+
+                        // Overlay Controls
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(bottom = 12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                IconButton(
+                                    onClick = { showMenu = true },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(Icons.Default.Menu, contentDescription = "Menu")
+                                }
+                                
+                                IconButton(
+                                    onClick = { viewModel.addBookmark(currentUrl, pageTitle) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(Icons.Filled.Bookmark, contentDescription = "Bookmark")
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        viewModel.downloadFile(currentUrl)
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(Icons.Default.Download, contentDescription = "Download")
+                                }
                             }
                         }
-                    }
-                },
-                onTranslate = { lang ->
-                    viewModel.translatePage(lang)
-                    showMenu = false
-                },
-                onDeleteDownloadedFile = { id, path ->
-                    viewModel.deleteDownloadedFile(id, path)
-                },
-                onDeleteHistoryEntry = { id ->
-                    viewModel.deleteHistoryEntry(id)
-                },
-                onClearHistory = {
-                    viewModel.clearHistory()
-                },
-                onNavigate = { url ->
-                    viewModel.navigateTo(url)
-                    showMenu = false
-                },
-                onClose = { showMenu = false },
-                onToggleDeepMode = { viewModel.toggleDeepMode() },
-                isDeepMode = isDeepMode
-            )
-        } else if (currentUrl == "wearbrowser://home") {
-            HomeScreen(
-                bookmarks = bookmarks,
-                history = history,
-                onNavigate = { url ->
-                    viewModel.navigateTo(url)
-                }
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(if (isDeepMode) Color.Black else MaterialTheme.colorScheme.background)
-                    .focusRequester(webViewFocusRequester)
-                    .focusable()
-                    .onRotaryScrollEvent {
-                        // Support high-precision mechanical crown scrolling for the web page itself!
-                        webViewRef?.scrollBy(0, (it.verticalScrollPixels * 1.5f).toInt())
-                        true
-                    }
-            ) {
-                WebViewComponent(
-                    url = currentUrl,
-                    isPowerSaving = isPowerSavingMode,
-                    textZoom = textZoom,
-                    onPageStarted = { isLoading = true },
-                    onPageFinished = { title ->
-                        isLoading = false
-                        pageTitle = title ?: ""
-                        viewModel.addToHistory(currentUrl, pageTitle)
-                        canGoBack = webViewRef?.canGoBack() == true
-                    },
-                    onWebViewCreated = { webViewRef = it },
-                    onDownloadRequested = { downloadUrl, contentDisposition, mimeType ->
-                        viewModel.downloadFile(downloadUrl, contentDisposition, mimeType)
-                    }
-                )
-
-                // Overlay Controls
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        IconButton(
-                            onClick = { showMenu = true },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(Icons.Default.Menu, contentDescription = "Menu")
-                        }
                         
-                        IconButton(
-                            onClick = { viewModel.addBookmark(currentUrl, pageTitle) },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(Icons.Filled.Bookmark, contentDescription = "Bookmark")
+                        if (isLoading) {
+                            val infiniteTransition = rememberInfiniteTransition(label = "ProgressGlow")
+                            val pulseScale by infiniteTransition.animateFloat(
+                                initialValue = 0.95f,
+                                targetValue = 1.15f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(1000, easing = FastOutSlowInEasing),
+                                    repeatMode = RepeatMode.Reverse
+                                ),
+                                label = "Pulse"
+                            )
+                            val pulseAlpha by infiniteTransition.animateFloat(
+                                initialValue = 0.3f,
+                                targetValue = 0.7f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(1000, easing = FastOutSlowInEasing),
+                                    repeatMode = RepeatMode.Reverse
+                                ),
+                                label = "Alpha"
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.Center)
+                                    .size(48.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.Center)
+                                        .size(36.dp)
+                                        .scale(pulseScale)
+                                        .alpha(pulseAlpha)
+                                        .background(
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                            shape = androidx.compose.foundation.shape.CircleShape
+                                        )
+                                )
+                                CircularProgressIndicator(
+                                    progress = { 0.5f },
+                                    modifier = Modifier.align(Alignment.Center)
+                                )
+                            }
                         }
 
-                        IconButton(
-                            onClick = {
-                                viewModel.downloadFile(currentUrl)
-                            },
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(Icons.Default.Download, contentDescription = "Download")
-                        }
                     }
-                }
-                
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        progress = { 0.5f },
-                        modifier = Modifier.align(Alignment.Center)
-                    )
                 }
             }
         }
-        
-        TimeText(modifier = Modifier.align(Alignment.TopCenter)) {
-            time()
+
+        // Swipe up from the very bottom of the screen to open the full-screen menu
+            val bottomDensity = androidx.compose.ui.platform.LocalDensity.current
+            val bottomThresholdPx = with(bottomDensity) { 45.dp.toPx() }
+            val bottomAnim = remember { Animatable(0f) }
+            val bottomProgress = (abs(bottomAnim.value) / bottomThresholdPx).coerceIn(0f, 1f)
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(40.dp)
+                    .align(Alignment.BottomCenter)
+                    .pointerInput(showMenu) {
+                        if (showMenu) return@pointerInput
+                        detectVerticalDragGestures(
+                            onDragStart = {
+                                coroutineScope.launch {
+                                    bottomAnim.snapTo(0f)
+                                }
+                            },
+                            onDragEnd = {
+                                if (bottomAnim.value < -bottomThresholdPx) {
+                                    showMenu = true
+                                }
+                                coroutineScope.launch {
+                                    bottomAnim.animateTo(
+                                        targetValue = 0f,
+                                        animationSpec = spring(
+                                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                                            stiffness = Spring.StiffnessMediumLow
+                                        )
+                                    )
+                                }
+                            },
+                            onDragCancel = {
+                                coroutineScope.launch {
+                                    bottomAnim.animateTo(
+                                        targetValue = 0f,
+                                        animationSpec = spring(
+                                            dampingRatio = Spring.DampingRatioMediumBouncy,
+                                            stiffness = Spring.StiffnessMediumLow
+                                        )
+                                    )
+                                }
+                            },
+                            onVerticalDrag = { change, dragAmount ->
+                                coroutineScope.launch {
+                                    bottomAnim.snapTo((bottomAnim.value + dragAmount).coerceAtMost(0f))
+                                }
+                            }
+                        )
+                    }
+            )
+
+            // Bottom slide-up visual indicator
+            if (bottomProgress > 0f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .offset(y = (40 - (bottomProgress * 40)).dp)
+                        .size(width = 72.dp, height = 48.dp)
+                        .alpha(bottomProgress)
+                        .scale(0.8f + bottomProgress * 0.2f)
+                        .background(
+                            color = if (bottomProgress >= 1f)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.primaryContainer,
+                            shape = RoundedCornerShape(topStart = 36.dp, topEnd = 36.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowUpward,
+                        contentDescription = "Open Menu",
+                        tint = if (bottomProgress >= 1f)
+                            MaterialTheme.colorScheme.onPrimary
+                        else
+                            MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier
+                            .size(24.dp)
+                            .offset(y = (-4).dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -301,6 +460,104 @@ fun formatFileSize(bytes: Long): String {
     return String.format("%.1f %s", bytes / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
 }
 
+@Composable
+fun Modifier.expressiveScale(interactionSource: MutableInteractionSource): Modifier {
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.94f else 1.0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "ExpressiveScale"
+    )
+    return this.scale(scale)
+}
+
+@Composable
+fun ExpressiveVoiceWave(modifier: Modifier = Modifier) {
+    val infiniteTransition = rememberInfiniteTransition(label = "VoiceWave")
+    val animValue1 by infiniteTransition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(400, easing = FastOutLinearInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "Wave1"
+    )
+    val animValue2 by infiniteTransition.animateFloat(
+        initialValue = 0.2f,
+        targetValue = 0.8f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(550, easing = LinearOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "Wave2"
+    )
+    val animValue3 by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 0.9f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(350, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "Wave3"
+    )
+
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        listOf(animValue1, animValue2, animValue3, animValue2 * 0.9f).forEach { heightPercent ->
+            Box(
+                modifier = Modifier
+                    .size(width = 3.dp, height = (18.dp * heightPercent))
+                    .background(
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        shape = RoundedCornerShape(1.5.dp)
+                    )
+            )
+        }
+    }
+}
+
+@Composable
+fun ExpressiveDialog(
+    onDismissRequest: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Dialog(onDismissRequest = onDismissRequest) {
+        var animateIn by remember { mutableStateOf(false) }
+        LaunchedEffect(Unit) {
+            animateIn = true
+        }
+        val scale by animateFloatAsState(
+            targetValue = if (animateIn) 1.0f else 0.75f,
+            animationSpec = spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessMediumLow
+            ),
+            label = "DialogScale"
+        )
+        val dialogAlpha by animateFloatAsState(
+            targetValue = if (animateIn) 1.0f else 0.0f,
+            animationSpec = tween(durationMillis = 180, easing = LinearOutSlowInEasing),
+            label = "DialogAlpha"
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .scale(scale)
+                .alpha(dialogAlpha),
+            contentAlignment = Alignment.Center
+        ) {
+            content()
+        }
+    }
+}
+
 @OptIn(androidx.wear.compose.material3.ExperimentalWearMaterial3Api::class)
 @Composable
 fun BookmarkMenu(
@@ -348,10 +605,14 @@ fun BookmarkMenu(
     val isTranslatable = currentUrl.startsWith("http://") || currentUrl.startsWith("https://")
 
     LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
+        try {
+            focusRequester.requestFocus()
+        } catch (e: Exception) {
+            // Ignore focus request failure
+        }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    ScreenScaffold(scrollState = listState) {
         ScalingLazyColumn(
             state = listState,
             modifier = modifier
@@ -372,10 +633,15 @@ fun BookmarkMenu(
                 }
 
                 item {
+                    val homeInteraction = remember { MutableInteractionSource() }
                     Card(
                         onClick = { onNavigate("wearbrowser://home") },
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp)
+                            .expressiveScale(homeInteraction),
+                        interactionSource = homeInteraction
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -395,10 +661,15 @@ fun BookmarkMenu(
 
                 // Search & Enter URL Button
                 item {
+                    val searchInteraction = remember { MutableInteractionSource() }
                     Card(
                         onClick = { showSearchDialog = true },
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp)
+                            .expressiveScale(searchInteraction),
+                        interactionSource = searchInteraction
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -418,10 +689,15 @@ fun BookmarkMenu(
 
                 // Share/Open on Phone Button
                 item {
+                    val qrInteraction = remember { MutableInteractionSource() }
                     Card(
                         onClick = { showQrDialog = true },
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp)
+                            .expressiveScale(qrInteraction),
+                        interactionSource = qrInteraction
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -446,9 +722,14 @@ fun BookmarkMenu(
                 }
                 
                 item {
+                    val deepModeInteraction = remember { MutableInteractionSource() }
                     Card(
                         onClick = onToggleDeepMode,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp)
+                            .expressiveScale(deepModeInteraction),
+                        interactionSource = deepModeInteraction,
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                     ) {
                         Row(
@@ -472,9 +753,14 @@ fun BookmarkMenu(
 
                 // Real-Time TTS Voice Reader (Read Aloud)
                 item {
+                    val speakInteraction = remember { MutableInteractionSource() }
                     Card(
                         onClick = onToggleSpeak,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp)
+                            .expressiveScale(speakInteraction),
+                        interactionSource = speakInteraction,
                         colors = CardDefaults.cardColors(
                             containerColor = if (isSpeaking) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer
                         )
@@ -488,12 +774,16 @@ fun BookmarkMenu(
                                 Text("Listen to Page", style = MaterialTheme.typography.labelMedium, color = if (isSpeaking) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer)
                                 Text(if (isSpeaking) "Reading aloud..." else "Text-to-speech reader", style = MaterialTheme.typography.bodySmall, color = if (isSpeaking) MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
                             }
-                            Icon(
-                                imageVector = if (isSpeaking) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                                contentDescription = "Read Aloud icon",
-                                tint = if (isSpeaking) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.size(24.dp)
-                            )
+                            if (isSpeaking) {
+                                ExpressiveVoiceWave(modifier = Modifier.padding(end = 4.dp))
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.VolumeUp,
+                                    contentDescription = "Read Aloud icon",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -503,7 +793,7 @@ fun BookmarkMenu(
                     Card(
                         onClick = {},
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
                     ) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -583,7 +873,7 @@ fun BookmarkMenu(
                             Card(
                                 onClick = { showTranslateMenu = true },
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).padding(bottom = 8.dp)
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).padding(bottom = 8.dp)
                             ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth().padding(8.dp),
@@ -605,7 +895,7 @@ fun BookmarkMenu(
                             Card(
                                 onClick = { showTranslateMenu = false },
                                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).padding(bottom = 8.dp)
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).padding(bottom = 8.dp)
                             ) {
                                 Text("返回", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(8.dp))
                             }
@@ -618,7 +908,7 @@ fun BookmarkMenu(
                                         showTranslateMenu = false
                                     },
                                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).padding(bottom = 8.dp)
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).padding(bottom = 8.dp)
                                 ) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth().padding(8.dp),
@@ -654,7 +944,7 @@ fun BookmarkMenu(
                 items(bookmarks) { bookmark ->
                     Card(
                         onClick = { onNavigate(bookmark.url) },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                     ) {
                         Column {
@@ -679,7 +969,7 @@ fun BookmarkMenu(
                 items(downloadedFiles) { file ->
                     Card(
                         onClick = { onNavigate("file://${file.localPath}") },
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                     ) {
                         Row(
@@ -721,7 +1011,7 @@ fun BookmarkMenu(
                         Button(
                             onClick = onClearHistory,
                             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp)
                         ) {
                             Text("Clear All History", color = MaterialTheme.colorScheme.onErrorContainer)
                         }
@@ -730,7 +1020,7 @@ fun BookmarkMenu(
                     items(history) { entry ->
                         Card(
                             onClick = { onNavigate(entry.url) },
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                         ) {
                             Row(
@@ -768,19 +1058,11 @@ fun BookmarkMenu(
                     }
                 }
             }
-
-            TimeText {
-                time()
-            }
-            ScrollIndicator(
-                state = listState,
-                modifier = Modifier.align(Alignment.CenterEnd)
-            )
         }
 
     // SEARCH & URL INPUT DIALOG
     if (showSearchDialog) {
-        Dialog(onDismissRequest = { showSearchDialog = false }) {
+        ExpressiveDialog(onDismissRequest = { showSearchDialog = false }) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -792,7 +1074,11 @@ fun BookmarkMenu(
                 val searchFocusRequester = remember { FocusRequester() }
                 
                 LaunchedEffect(Unit) {
-                    searchFocusRequester.requestFocus()
+                    try {
+                        searchFocusRequester.requestFocus()
+                    } catch (e: Exception) {
+                        // Ignore focus request failure
+                    }
                 }
                 
                 ScalingLazyColumn(
@@ -946,7 +1232,7 @@ fun BookmarkMenu(
 
     // QR CODE DIALOG (SEND TO PHONE)
     if (showQrDialog) {
-        Dialog(onDismissRequest = { showQrDialog = false }) {
+        ExpressiveDialog(onDismissRequest = { showQrDialog = false }) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -958,7 +1244,11 @@ fun BookmarkMenu(
                 val qrFocusRequester = remember { FocusRequester() }
                 
                 LaunchedEffect(Unit) {
-                    qrFocusRequester.requestFocus()
+                    try {
+                        qrFocusRequester.requestFocus()
+                    } catch (e: Exception) {
+                        // Ignore focus request failure
+                    }
                 }
                 
                 ScalingLazyColumn(
@@ -1054,10 +1344,14 @@ fun HomeScreen(
     var searchQuery by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
+        try {
+            focusRequester.requestFocus()
+        } catch (e: Exception) {
+            // Ignore focus request failure
+        }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    ScreenScaffold(scrollState = listState) {
         ScalingLazyColumn(
             state = listState,
             modifier = Modifier
@@ -1083,10 +1377,15 @@ fun HomeScreen(
                 }
 
                 item {
+                    val searchInteraction = remember { MutableInteractionSource() }
                     Card(
                         onClick = { showSearchDialog = true },
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp)
+                            .expressiveScale(searchInteraction),
+                        interactionSource = searchInteraction
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1116,26 +1415,28 @@ fun HomeScreen(
 
                 item {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
+                        val googleInt = remember { MutableInteractionSource() }
                         IconButton(
                             onClick = { onNavigate("https://www.google.com") },
-                            modifier = Modifier.size(48.dp)
+                            modifier = Modifier
+                                .size(48.dp)
+                                .expressiveScale(googleInt),
+                            interactionSource = googleInt
                         ) {
                             Icon(Icons.Default.Search, contentDescription = "Google", tint = MaterialTheme.colorScheme.primary)
                         }
+                        val wikiInt = remember { MutableInteractionSource() }
                         IconButton(
                             onClick = { onNavigate("https://en.wikipedia.org") },
-                            modifier = Modifier.size(48.dp)
+                            modifier = Modifier
+                                .size(48.dp)
+                                .expressiveScale(wikiInt),
+                            interactionSource = wikiInt
                         ) {
                             Icon(Icons.Default.MenuBook, contentDescription = "Wikipedia", tint = MaterialTheme.colorScheme.secondary)
-                        }
-                        IconButton(
-                            onClick = { onNavigate("https://weather.com") },
-                            modifier = Modifier.size(48.dp)
-                        ) {
-                            Icon(Icons.Default.Cloud, contentDescription = "Weather", tint = MaterialTheme.colorScheme.tertiary)
                         }
                     }
                 }
@@ -1147,9 +1448,14 @@ fun HomeScreen(
                         }
                     }
                     items(bookmarks.take(3)) { bookmark ->
+                        val cardInt = remember { MutableInteractionSource() }
                         Card(
                             onClick = { onNavigate(bookmark.url) },
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp)
+                                .expressiveScale(cardInt),
+                            interactionSource = cardInt,
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                         ) {
                             Column {
@@ -1167,9 +1473,14 @@ fun HomeScreen(
                         }
                     }
                     items(history.take(3)) { entry ->
+                        val cardInt = remember { MutableInteractionSource() }
                         Card(
                             onClick = { onNavigate(entry.url) },
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 4.dp)
+                                .expressiveScale(cardInt),
+                            interactionSource = cardInt,
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
                         ) {
                             Column {
@@ -1180,18 +1491,10 @@ fun HomeScreen(
                     }
                 }
             }
-
-            TimeText {
-                time()
-            }
-            ScrollIndicator(
-                state = listState,
-                modifier = Modifier.align(Alignment.CenterEnd)
-            )
         }
 
     if (showSearchDialog) {
-        Dialog(onDismissRequest = { showSearchDialog = false }) {
+        ExpressiveDialog(onDismissRequest = { showSearchDialog = false }) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1203,7 +1506,11 @@ fun HomeScreen(
                 val searchFocusRequester = remember { FocusRequester() }
 
                 LaunchedEffect(Unit) {
-                    searchFocusRequester.requestFocus()
+                    try {
+                        searchFocusRequester.requestFocus()
+                    } catch (e: Exception) {
+                        // Ignore focus request failure
+                    }
                 }
 
                 ScalingLazyColumn(
